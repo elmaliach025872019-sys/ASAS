@@ -30,6 +30,7 @@ jobs:
           URL: ${{ github.event.client_payload.url }}
           QUALITY: ${{ github.event.client_payload.quality }}
           YT_COOKIES: ${{ secrets.YT_COOKIES }}
+          PROXY: ${{ secrets.PROXY }}
         run: |
           mkdir out
           EXTRA=()
@@ -39,6 +40,10 @@ jobs:
             echo ">>> COOKIES: found ($(wc -l < cookies.txt) lines)"
           else
             echo ">>> COOKIES: secret YT_COOKIES is empty or missing"
+          fi
+          if [ -n "$PROXY" ]; then
+            EXTRA+=(--proxy "$PROXY")
+            echo ">>> PROXY: in use"
           fi
           case "$QUALITY" in
             mp3) FMT=(-x --audio-format mp3) ;;
@@ -50,7 +55,7 @@ jobs:
           OK=0
           for CLIENT in default mweb tv web_safari ios; do
             echo ">>> trying client: $CLIENT"
-            if yt-dlp "${EXTRA[@]}" --extractor-args "youtube:player_client=$CLIENT" "${FMT[@]}" \
+            if yt-dlp "${EXTRA[@]}" --extractor-args "youtube:player_client=$CLIENT" "${FMT[@]}" -S "vcodec:h264,res,acodec:m4a" \
                  --no-playlist --trim-filenames 80 -o "out/%(title)s.%(ext)s" "$URL"; then
               OK=1; break
             fi
