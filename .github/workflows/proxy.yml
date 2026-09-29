@@ -23,7 +23,7 @@ jobs:
           done
 
       - name: Install yt-dlp
-        run: pip install -U "yt-dlp[default]" bgutil-ytdlp-pot-provider
+        run: pip install -U --pre "yt-dlp[default]" bgutil-ytdlp-pot-provider
 
       - name: Download
         env:
@@ -42,12 +42,25 @@ jobs:
           fi
           case "$QUALITY" in
             mp3) FMT=(-x --audio-format mp3) ;;
-            1080) FMT=(-f "bv*[height<=1080]+ba/b[height<=1080]" --merge-output-format mp4) ;;
-            720)  FMT=(-f "bv*[height<=720]+ba/b[height<=720]" --merge-output-format mp4) ;;
-            480)  FMT=(-f "bv*[height<=480]+ba/b[height<=480]" --merge-output-format mp4) ;;
+            1080) FMT=(-f "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b" --merge-output-format mp4) ;;
+            720)  FMT=(-f "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b" --merge-output-format mp4) ;;
+            480)  FMT=(-f "bv*[height<=480]+ba/b[height<=480]/bv*+ba/b" --merge-output-format mp4) ;;
             *)    FMT=(-f "bv*+ba/b" --merge-output-format mp4) ;;
           esac
-          yt-dlp "${EXTRA[@]}" "${FMT[@]}" --no-playlist --trim-filenames 80 -o "out/%(title)s.%(ext)s" "$URL"
+          OK=0
+          for CLIENT in default mweb tv web_safari ios; do
+            echo ">>> trying client: $CLIENT"
+            if yt-dlp "${EXTRA[@]}" --extractor-args "youtube:player_client=$CLIENT" "${FMT[@]}" \
+                 --no-playlist --trim-filenames 80 -o "out/%(title)s.%(ext)s" "$URL"; then
+              OK=1; break
+            fi
+          done
+          if [ "$OK" != "1" ]; then
+            echo ">>> all clients failed, available formats:"
+            yt-dlp "${EXTRA[@]}" --list-formats --no-playlist "$URL" || true
+            rm -f cookies.txt
+            exit 1
+          fi
           rm -f cookies.txt
 
       - uses: actions/upload-artifact@v4
