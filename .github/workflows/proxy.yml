@@ -1,0 +1,47 @@
+name: Proxy Downloader
+run-name: dl-${{ github.event.client_payload.request_id }}
+
+on:
+  repository_dispatch:
+    types: [download]
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Start PO token provider
+        run: |
+          docker run -d --name pot -p 4416:4416 brainicism/bgutil-ytdlp-pot-provider
+          for i in $(seq 1 20); do
+            curl -s http://127.0.0.1:4416/ping && break
+            sleep 2
+          done
+
+      - name: Install yt-dlp
+        run: pip install -U "yt-dlp[default]" bgutil-ytdlp-pot-provider
+
+      - name: Download
+        env:
+          URL: ${{ github.event.client_payload.url }}
+          QUALITY: ${{ github.event.client_payload.quality }}
+        run: |
+          mkdir out
+          case "$QUALITY" in
+            mp3) FMT=(-x --audio-format mp3) ;;
+            1080) FMT=(-f "bv*[height<=1080]+ba/b[height<=1080]" --merge-output-format mp4) ;;
+            720)  FMT=(-f "bv*[height<=720]+ba/b[height<=720]" --merge-output-format mp4) ;;
+            480)  FMT=(-f "bv*[height<=480]+ba/b[height<=480]" --merge-output-format mp4) ;;
+            *)    FMT=(-f "bv*+ba/b" --merge-output-format mp4) ;;
+          esac
+          yt-dlp "${FMT[@]}" --no-playlist --trim-filenames 80 -o "out/%(title)s.%(ext)s" "$URL"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: video
+          path: out/*
+          retention-days: 1
