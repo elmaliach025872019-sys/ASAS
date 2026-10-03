@@ -2,7 +2,7 @@ name: Proxy Downloader
 run-name: proxy ${{ github.event.client_payload.request_id }}
 
 on:
-  repository_dispatch:   # בלי types - מגיב לכל event_type, אז לא צריך להתאים לשם הישן
+  repository_dispatch:
 
 permissions:
   contents: read
@@ -19,28 +19,30 @@ jobs:
 
     steps:
       - name: Prepare
+        id: prep
         run: |
           mkdir -p out work
           echo "mode=$MODE quality=${QUALITY:-best}"
           echo "url=$URL"
           case "$URL" in
-            *youtube.com/*|*youtu.be/*|*youtube-nocookie.com/*) echo "IS_YT=1" >> "$GITHUB_ENV" ;;
-            *) echo "IS_YT=0" >> "$GITHUB_ENV" ;;
+            *youtube.com/*|*youtu.be/*|*youtube-nocookie.com/*) YT=1 ;;
+            *) YT=0 ;;
           esac
+          echo "IS_YT=$YT" >> "$GITHUB_ENV"
+          echo "is_yt=$YT" >> "$GITHUB_OUTPUT"
 
-      # ---------- video mode: setup ----------
       - name: Install yt-dlp
-        if: env.MODE == 'video'
+        if: github.event.client_payload.mode == 'video'
         run: python3 -m pip install -U --pre "yt-dlp[default]"
 
       - name: Setup Deno (YouTube only)
-        if: env.MODE == 'video' && env.IS_YT == '1'
+        if: github.event.client_payload.mode == 'video' && steps.prep.outputs.is_yt == '1'
         uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
 
       - name: Start PO token provider (YouTube only)
-        if: env.MODE == 'video' && env.IS_YT == '1'
+        if: github.event.client_payload.mode == 'video' && steps.prep.outputs.is_yt == '1'
         run: |
           python3 -m pip install -U bgutil-ytdlp-pot-provider
           docker run -d --name bgutil -p 4416:4416 brainicism/bgutil-ytdlp-pot-provider
@@ -50,9 +52,9 @@ jobs:
           done
 
       - name: Cookies (YouTube only)
-        if: env.MODE == 'video' && env.IS_YT == '1'
+        if: github.event.client_payload.mode == 'video' && steps.prep.outputs.is_yt == '1'
         env:
-          COOKIES_DATA: ${{ secrets.YT_COOKIES }}   # <-- אם ה-secret שלך נקרא אחרת, שנה כאן
+          COOKIES_DATA: ${{ secrets.YT_COOKIES }}
         run: |
           if [ -n "$COOKIES_DATA" ]; then
             printf '%s\n' "$COOKIES_DATA" > work/cookies.txt
@@ -61,9 +63,8 @@ jobs:
             echo ">>> COOKIES: none"
           fi
 
-      # ---------- video mode: download ----------
       - name: Download video
-        if: env.MODE == 'video'
+        if: github.event.client_payload.mode == 'video'
         run: |
           Q="${QUALITY:-best}"
           case "$Q" in
@@ -85,7 +86,6 @@ jobs:
           ok=0
 
           if [ "$IS_YT" = "1" ]; then
-            # ----- YouTube: כמו קודם -----
             EXTRA=()
             [ -s work/cookies.txt ] && EXTRA+=(--cookies work/cookies.txt)
             for c in default mweb tv web_safari ios; do
@@ -95,7 +95,6 @@ jobs:
               fi
             done
           else
-            # ----- כל אתר אחר: בלי cookies ובלי לולאת clients -----
             echo ">>> direct attempt"
             if run_ytdlp --user-agent "$UA" "$URL"; then ok=1; fi
 
@@ -115,12 +114,7 @@ jobs:
 
               if [ "$got" = "0" ]; then
                 echo ">>> trying Wayback Machine"
-                snap=$(curl -s "https://archive.org/wayback/available?url=$URL" \
-                  | python3 -c 'import sys,json
-try:
-    d=json.load(sys.stdin); print(d.get("archived_snapshots",{}).get("closest",{}).get("url",""))
-except Exception:
-    print("")')
+                snap=$(curl -s "https://archive.org/wayback/available?url=$URL" | grep -oE '"url": *"[^"]+"' | head -n1 | cut -d'"' -f4)
                 if [ -n "$snap" ]; then
                   echo "snapshot: $snap"
                   curl -sL -A "$UA" -o work/page.html "$snap" && got=1
@@ -151,9 +145,8 @@ except Exception:
             exit 1
           fi
 
-      # ---------- file mode ----------
       - name: Download file
-        if: env.MODE == 'file'
+        if: github.event.client_payload.mode == 'file'
         run: |
           if ! curl -fL --retry 4 --retry-delay 5 --retry-all-errors \
                  -A "$UA" -e "$URL" -OJ --output-dir out "$URL"; then
@@ -164,7 +157,6 @@ except Exception:
           fi
           ls -la out
 
-      # ---------- upload ----------
       - name: Upload result
         if: always()
         uses: actions/upload-artifact@v4
