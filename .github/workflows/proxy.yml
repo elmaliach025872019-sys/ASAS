@@ -1,168 +1,79 @@
 name: Proxy Downloader
-run-name: proxy ${{ github.event.client_payload.request_id }}
+run-name: dl-${{ github.event.client_payload.request_id }}
 
 on:
   repository_dispatch:
-
-permissions:
-  contents: read
+    types: [download]
 
 jobs:
   download:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    env:
-      URL: ${{ github.event.client_payload.url }}
-      MODE: ${{ github.event.client_payload.mode }}
-      QUALITY: ${{ github.event.client_payload.quality }}
-      UA: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-
+    timeout-minutes: 30
     steps:
-      - name: Prepare
-        id: prep
-        run: |
-          mkdir -p out work
-          echo "mode=$MODE quality=${QUALITY:-best}"
-          echo "url=$URL"
-          case "$URL" in
-            *youtube.com/*|*youtu.be/*|*youtube-nocookie.com/*) YT=1 ;;
-            *) YT=0 ;;
-          esac
-          echo "IS_YT=$YT" >> "$GITHUB_ENV"
-          echo "is_yt=$YT" >> "$GITHUB_OUTPUT"
-
-      - name: Install yt-dlp
-        if: github.event.client_payload.mode == 'video'
-        run: python3 -m pip install -U --pre "yt-dlp[default]"
-
-      - name: Setup Deno (YouTube only)
-        if: github.event.client_payload.mode == 'video' && steps.prep.outputs.is_yt == '1'
-        uses: denoland/setup-deno@v2
+      - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
 
-      - name: Start PO token provider (YouTube only)
-        if: github.event.client_payload.mode == 'video' && steps.prep.outputs.is_yt == '1'
+      - name: Start PO token provider
         run: |
-          python3 -m pip install -U bgutil-ytdlp-pot-provider
-          docker run -d --name bgutil -p 4416:4416 brainicism/bgutil-ytdlp-pot-provider
-          for i in $(seq 1 30); do
-            if curl -s -o /dev/null http://127.0.0.1:4416/ping; then echo "PO provider ready"; break; fi
+          docker run -d --name pot -p 4416:4416 brainicism/bgutil-ytdlp-pot-provider
+          for i in $(seq 1 20); do
+            curl -s http://127.0.0.1:4416/ping && break
             sleep 2
           done
 
-      - name: Cookies (YouTube only)
-        if: github.event.client_payload.mode == 'video' && steps.prep.outputs.is_yt == '1'
+      - name: Install yt-dlp
+        run: pip install -U --pre "yt-dlp[default]" bgutil-ytdlp-pot-provider
+
+      - name: Download
         env:
-          COOKIES_DATA: ${{ secrets.YT_COOKIES }}
+          URL: ${{ github.event.client_payload.url }}
+          QUALITY: ${{ github.event.client_payload.quality }}
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+          PROXY: ${{ secrets.PROXY }}
         run: |
-          if [ -n "$COOKIES_DATA" ]; then
-            printf '%s\n' "$COOKIES_DATA" > work/cookies.txt
-            echo ">>> COOKIES: found ($(wc -l < work/cookies.txt) lines)"
+          mkdir out
+          EXTRA=()
+          if [ -n "$YT_COOKIES" ]; then
+            printf '%s\n' "$YT_COOKIES" > cookies.txt
+            EXTRA+=(--cookies cookies.txt)
+            echo ">>> COOKIES: found ($(wc -l < cookies.txt) lines)"
           else
-            echo ">>> COOKIES: none"
+            echo ">>> COOKIES: secret YT_COOKIES is empty or missing"
           fi
-
-      - name: Download video
-        if: github.event.client_payload.mode == 'video'
-        run: |
-          Q="${QUALITY:-best}"
-          case "$Q" in
-            1080) FMT='bv*[height<=1080]+ba/b[height<=1080]/b' ;;
-            720)  FMT='bv*[height<=720]+ba/b[height<=720]/b' ;;
-            480)  FMT='bv*[height<=480]+ba/b[height<=480]/b' ;;
-            mp3)  FMT='ba/b' ;;
-            *)    FMT='bv*+ba/b' ;;
+          if [ -n "$PROXY" ]; then
+            EXTRA+=(--proxy "$PROXY")
+            echo ">>> PROXY: in use"
+          fi
+          case "$QUALITY" in
+            mp3) FMT=(-x --audio-format mp3) ;;
+            1080) FMT=(-f "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b" --merge-output-format mp4) ;;
+            720)  FMT=(-f "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b" --merge-output-format mp4) ;;
+            480)  FMT=(-f "bv*[height<=480]+ba/b[height<=480]/bv*+ba/b" --merge-output-format mp4) ;;
+            *)    FMT=(-f "bv*+ba/b" --merge-output-format mp4) ;;
           esac
-
-          COMMON=(--no-playlist --no-warnings --newline -o 'out/%(title).80s.%(ext)s' -f "$FMT")
-          if [ "$Q" = "mp3" ]; then
-            COMMON+=(-x --audio-format mp3)
-          else
-            COMMON+=(--merge-output-format mp4)
-          fi
-
-          run_ytdlp() { yt-dlp "${COMMON[@]}" "$@" < /dev/null; }
-          ok=0
-
-          if [ "$IS_YT" = "1" ]; then
-            EXTRA=()
-            [ -s work/cookies.txt ] && EXTRA+=(--cookies work/cookies.txt)
-            for c in default mweb tv web_safari ios; do
-              echo ">>> trying client: $c"
-              if run_ytdlp "${EXTRA[@]}" --extractor-args "youtube:player_client=$c" "$URL"; then
-                ok=1; break
-              fi
-            done
-          else
-            echo ">>> direct attempt"
-            if run_ytdlp --user-agent "$UA" "$URL"; then ok=1; fi
-
-            if [ "$ok" = "0" ]; then
-              echo ">>> fetching page manually"
-              BASE="${URL%%\?*}"
-              got=0
-              for u in "$URL" "$BASE?m=1" "$BASE?view=classic" "$BASE?m=0"; do
-                echo ">>> GET $u"
-                code=$(curl -sL --retry 3 --retry-delay 10 --retry-all-errors \
-                  -A "$UA" -H "Accept-Language: en-US,en;q=0.9" \
-                  -o work/page.html -w '%{http_code}' "$u")
-                echo "status: $code"
-                if [ "$code" = "200" ]; then got=1; break; fi
-                sleep 15
-              done
-
-              if [ "$got" = "0" ]; then
-                echo ">>> trying Wayback Machine"
-                snap=$(curl -s "https://archive.org/wayback/available?url=$URL" | grep -oE '"url": *"[^"]+"' | head -n1 | cut -d'"' -f4)
-                if [ -n "$snap" ]; then
-                  echo "snapshot: $snap"
-                  curl -sL -A "$UA" -o work/page.html "$snap" && got=1
-                fi
-              fi
-
-              if [ "$got" = "1" ]; then
-                sed -e 's/&amp;/\&/g' -e 's/\\u0026/\&/g' -e 's#\\/#/#g' work/page.html > work/page.clean.html
-                grep -oE "https?://[^\"' <>)]+" work/page.clean.html \
-                  | grep -Ei 'blogger\.com/video\.g|youtube(-nocookie)?\.com/embed|youtu\.be/|player\.vimeo\.com|dailymotion\.com|streamable\.com|\.mp4|\.m3u8|\.webm|\.mov' \
-                  | awk '!seen[$0]++' > work/media_urls.txt
-                echo ">>> found media candidates:"
-                cat work/media_urls.txt
-
-                mapfile -t LIST < work/media_urls.txt
-                for m in "${LIST[@]}"; do
-                  echo ">>> trying media: $m"
-                  if run_ytdlp --user-agent "$UA" --referer "$URL" "$m"; then ok=1; break; fi
-                done
-              fi
+          OK=0
+          for CLIENT in default mweb tv web_safari ios; do
+            echo ">>> trying client: $CLIENT"
+            if yt-dlp "${EXTRA[@]}" --extractor-args "youtube:player_client=$CLIENT" "${FMT[@]}" -S "vcodec:h264,res,acodec:m4a" \
+                 --no-playlist --trim-filenames 80 -o "out/%(title)s.%(ext)s" "$URL"; then
+              OK=1; break
             fi
-          fi
-
-          if [ "$ok" != "1" ]; then
-            echo ">>> FAILED - saving debug files"
-            mkdir -p out/debug
-            cp work/page.html work/media_urls.txt out/debug/ 2>/dev/null || true
+          done
+          if [ "$OK" != "1" ]; then
+            echo ">>> all clients failed, available formats:"
+            yt-dlp "${EXTRA[@]}" --list-formats --no-playlist "$URL" || true
+            rm -f cookies.txt
             exit 1
           fi
+          rm -f cookies.txt
 
-      - name: Download file
-        if: github.event.client_payload.mode == 'file'
-        run: |
-          if ! curl -fL --retry 4 --retry-delay 5 --retry-all-errors \
-                 -A "$UA" -e "$URL" -OJ --output-dir out "$URL"; then
-            name="$(basename "${URL%%\?*}")"
-            [ -z "$name" ] && name="download.bin"
-            curl -fL --retry 4 --retry-delay 5 --retry-all-errors \
-              -A "$UA" -e "$URL" -o "out/$name" "$URL"
-          fi
-          ls -la out
+      - name: List output
+        run: ls -la out
 
-      - name: Upload result
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: result-${{ github.event.client_payload.request_id }}
-          path: out/
-          if-no-files-found: warn
-          compression-level: 0
-          retention-days: 3
+          name: video
+          path: out/*
+          if-no-files-found: error
+          retention-days: 1
