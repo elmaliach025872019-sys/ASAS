@@ -16,6 +16,7 @@ jobs:
       MODE: ${{ github.event.client_payload.mode }}
       URL: ${{ github.event.client_payload.url }}
       QUALITY: ${{ github.event.client_payload.quality }}
+      YT_COOKIES: ${{ secrets.YT_COOKIES }}
     steps:
       - name: Prepare
         run: mkdir -p out
@@ -29,7 +30,7 @@ jobs:
       - name: Setup yt-dlp and PO token provider
         if: env.MODE == 'video'
         run: |
-          pip install -U "yt-dlp[default]" bgutil-ytdlp-pot-provider
+          pip install -U --pre "yt-dlp[default]" bgutil-ytdlp-pot-provider
           docker run -d --name pot -p 4416:4416 brainicism/bgutil-ytdlp-pot-provider
           for i in $(seq 1 30); do
             curl -fs http://127.0.0.1:4416/ping >/dev/null && break
@@ -47,7 +48,13 @@ jobs:
             480)  FMT=(-f "bv*[height<=480]+ba/b[height<=480]/b" --merge-output-format mp4) ;;
             *)    FMT=(-f "bv*+ba/b" --merge-output-format mp4) ;;
           esac
+          COOKIE_ARGS=()
+          if [ -n "${YT_COOKIES:-}" ]; then
+            printf '%s\n' "$YT_COOKIES" > "$RUNNER_TEMP/cookies.txt"
+            COOKIE_ARGS=(--cookies "$RUNNER_TEMP/cookies.txt")
+          fi
           yt-dlp --no-playlist --retries 5 --fragment-retries 5 \
+            "${COOKIE_ARGS[@]}" \
             --print-to-file "%(title)s" out/meta.txt \
             "${FMT[@]}" -o "out/video.%(ext)s" "$URL"
 
